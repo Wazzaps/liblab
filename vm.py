@@ -1,23 +1,61 @@
+"""
+Virtual machine abstraction
+"""
 import libvirt
 import sys
 import uuid
 import time
+import atexit
+import string
 import random
 import os.path
+import subprocess as sp
 
-hypervisor_connections = {}
+_hypervisor_connections = {}
 
 
 class Component:
+    """Part of a `VM` that typically defines a `Device` or `System` information.
+
+    Example:
+        After creating a VM with a component like so:
+
+            my_component = SATADisk('...')
+            machine = VM([my_component])
+
+        You may retrieve it by calling `Component.of` or `Component.all_of`:
+
+            assert SATADisk.of(machine) is my_component
+            assert SATADisk.all_of(machine)[0] is my_component
+    """
     @classmethod
     def of(cls, obj):
+        """Get the first matching component from a VM or list of components.
+
+        Example:
+            The `System` component is a common "singleton" component, which is a good use case for `Component.of`:
+
+                machine = VM()
+                System.of(machine).arch  # => "x86_64"
+        """
         for comp in cls.all_of(obj):
             return comp
 
     @classmethod
     def all_of(cls, obj):
-        assert isinstance(
-            obj, (VM, list)), 'Component.of(obj): obj must be a `VM` or a `list`'
+        """Get a list of all matching components from a VM or list of components.
+
+        Example:
+            Get all disks of a machine:
+
+                machine = VM([SATADisk('a.qcow2'), SATADisk('a.qcow2')])
+                print(Disk.all_of(machine))  # => [<SATADisk object at 0x7f055e9823a0>, <SATADisk object at 0x7f055e982400>]
+
+                for disk in Disk.all_of(machine):
+                    print(disk.image_path)  # => '/img/a.qcow2', '/img/b.qcow2'
+        """
+        assert isinstance(obj, (VM, list)), \
+            'Component.of(obj): obj must be a `VM` or a `list`'
 
         if isinstance(obj, VM):
             obj = obj.components
@@ -30,13 +68,21 @@ class Component:
 
 
 class System(Component):
+    """Describes the CPU, Chipset, RAM, and Platform Devices of the VM.
+
+    Args:
+        arch: The architecture of the VM (default: x86_64)
+        chipset: The chipset of the VM (default: pc-q35-4.2)
+        ram_mib: RAM in MiB allocated to the VM (default: 256MiB)
+        cpu_count: The number of cores allocated to the VM (default: 1)
+    """
     def __init__(self, arch='x86_64', chipset='pc-q35-4.2', ram_mib=256, cpu_count=1):
         self.arch = arch
         self.chipset = chipset
         self.ram_mib = ram_mib
         self.cpu_count = cpu_count
 
-    def to_xml(self, devices):
+    def _to_xml(self, devices):
         # TODO: UEFI
         #     <os>
         #         <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
@@ -114,68 +160,169 @@ class System(Component):
         )
 
 
-class Disk(Component):
-    def __init__(self, image_path, linked_clone=False):
+class Device(Component):
+    """A `Component` that needs to be initialized and destroyed, and adds a device to the libvirt XML."""
+    def create(self, machine_name, components):
+        pass
+
+    def destroy(self):
+        pass
+
+    def _to_xml(self):
+        raise NotImplementedError
+
+
+class Disk(Device):
+    """A Storage device backed by a QCow2 image, and linked-cloned by default.
+
+    Use one of the subclasses (such as `SATADisk`).
+
+    Example:
+        Create a linked clone disk:
+
+            SATADisk('example.qcow2')
+
+        Create a live disk (All changes made in VM are saved):
+
+            SATADisk('example.qcow2', linked_clone=False)
+    """
+    _LINKED_CLONES_DIR = '/tmp/liblab_disks'
+    def __init__(self, image_path, linked_clone=True):
         assert image_path.endswith('.qcow2'), 'Images must be QCow2'
         self.image_path = os.path.abspath(image_path)
-        self.linked_clone = linked_clone
+        self._linked_clone = linked_clone
+        self.idx_in_machine = None
+        self.live_image_path = None
 
-        if self.linked_clone:
-            pass  # TODO
+    @staticmethod
+    def _create_linked_clone(image_path, clone_name):
+        assert os.path.exists(image_path), f'Disk image not found: {image_path}'
+        clone_path = os.path.join(Disk._LINKED_CLONES_DIR, clone_name)
+        assert not os.path.exists(clone_path), f'Linked clone name conflict: {clone_path} (when creating clone of: {image_path})'
+        if not os.path.exists(Disk._LINKED_CLONES_DIR):
+            os.mkdir(Disk._LINKED_CLONES_DIR)
+
+        sp.check_output([
+            'qemu-img', 'create',
+            '-f', 'qcow2',
+            '-b', image_path,
+            clone_path
+        ])
+
+        return clone_path
+
+    def __str__(self):
+        if self._linked_clone:
+            return f'{type(self).__name__}(base={repr(self.image_path)}, clone={repr(self.live_image_path)})'
         else:
-            self.clone_path = self.image_path
+            return f'{type(self).__name__}({repr(self.image_path)})'
+
+    def create(self, machine_name, components):
+        self.idx_in_machine = Disk.all_of(components).index(self)
+        if self._linked_clone:
+            self.live_image_path = Disk._create_linked_clone(self.image_path, clone_name=f'{machine_name}-disk{self.idx_in_machine}.qcow2')
+        else:
+            self.live_image_path = self.image_path
+
+    def destroy(self):
+        if self._linked_clone:
+            try:
+                os.unlink(self.live_image_path)
+            except FileNotFoundError:
+                pass
 
 
 class SATADisk(Disk):
-    def to_xml(self):
+    """`Disk` with a SATA interface.
+    """
+    def _to_xml(self):
+        assert self.live_image_path, 'Please call `Disk.create` first'
         return f'''
         <disk type='file' device='disk'>
             <driver name='qemu' type='qcow2'/>
-            <source file='{self.clone_path}'/>
-            <target dev='sda' bus='sata'/>
+            <source file='{self.live_image_path}'/>
+            <target dev='sd{string.ascii_lowercase[self.idx_in_machine]}' bus='sata'/>
         </disk>
         '''
 
 
 class VM:
+    """Define a virtual machine from a list of `Component`s.
+
+    The machine will be given a random UUID and name (in the format 'llm_xxxxxxxx').
+
+    Args:
+        components: A list of `Component`s that define the VM. A `System` is added automatically if absent
+        persistent: Does the machine (and it's temporary resources) survive if Python dies?
+        hypervisor_uri: The hypervisor to create the VM in (`qemu:///system` by default)
+
+    Example:
+        Creating the machine:
+
+            # Doesn't have a disk, will be created but won't boot
+            machine = VM()
+            # Enough to boot, has default System() parameters
+            machine = VM([SATADisk('example.qcow2')])
+            # Machine with extra resources
+            machine = VM([
+                System(ram_mib=512, cpu_count=2),
+                SATADisk('example.qcow2'),
+            ])
+            # Machine with alternative architecture (Not implemented)
+            machine = VM([
+                System(arch='arm'),
+                SATADisk('example.qcow2'),
+            ])
+            # With context manager
+            components = [SATADisk('example.qcow2')]
+            with VM(components) as machine:
+                machine.console()
+    """
     _CREATE_TRIES = 10
 
     @staticmethod
-    def present_components(components):
+    def pretty_format_components(components):
+        """Return a pretty representation of the given components.
+
+        TODO: Currently not pretty
+        """
         return str(components)
 
     def __str__(self):
-        return VM.present_components(self.components)
+        return VM.pretty_format_components(self.components)
 
-    def __init__(self, components=None, hypervisor_uri='qemu:///system'):
+    def __init__(self, components=None, persistent=False, hypervisor_uri='qemu:///system'):
         if components is None:
             components = []
         if System.of(components) is None:
             components.append(System())
 
         self.components = components
-        self.hypervisor_uri = hypervisor_uri
-        self._conn = None
+        self._hypervisor_uri = hypervisor_uri
+        self._persistent = persistent
+        self._libvirt = None
         self._dom = None
+        self._was_destroyed = False
 
     def create(self):
-        if self.hypervisor_uri not in hypervisor_connections:
-            hypervisor_connections[self.hypervisor_uri] = libvirt.open(
-                self.hypervisor_uri)
+        """Create the machine, and initialize all devices."""
+        if self._hypervisor_uri not in _hypervisor_connections:
+            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
+                self._hypervisor_uri)
 
-        self._conn = hypervisor_connections[self.hypervisor_uri]
+        self._libvirt = _hypervisor_connections[self._hypervisor_uri]
 
-        # Gather devices xml
-        devices_xml = ''
-        for device_type in [SATADisk]:
-            for device in device_type.all_of(self):
-                device.to_xml()
-                devices_xml += device.to_xml()
-
+        # Attempt to recreate VM multiple times - in case of uuid/name conflict or OOM
         for i in range(VM._CREATE_TRIES):
             try:
                 self._uuid = str(uuid.uuid4())
                 self.name = f'llm_{hex(random.randint(0, 0xffffffff))[2:]}'
+
+                # Gather devices xml
+                devices_xml = ''
+                for device in Device.all_of(self):
+                    device.create(self.name, self.components)
+                    devices_xml += device._to_xml()
 
                 xml = '''
                 <domain type='kvm'>
@@ -186,15 +333,53 @@ class VM:
                 '''.format(
                     name=self.name,
                     uuid=self._uuid,
-                    system=System.of(self).to_xml(devices_xml)
+                    system=System.of(self)._to_xml(devices_xml)
                 )
-                self._dom = self._conn.createXML(xml)
+
+                # Create the domain
+                self._dom = self._libvirt.createXML(xml)
                 break
             except libvirt.libvirtError:
+                # We failed to create the VM, destroy all devices
+                for device in Device.all_of(self):
+                    try:
+                        device.destroy()
+                    except libvirt.libvirtError:
+                        pass
+
+                # Retry if it's not the last iteration
                 if i == VM._CREATE_TRIES-1:
                     raise
                 time.sleep(3)
 
-    def destroy(self):
+        if not self._persistent:
+            atexit.register(self.destroy)
 
-        self._dom.destroy()
+    def destroy(self):
+        """Destroy the machine and all devices."""
+        if self._was_destroyed:
+            return
+
+        try:
+            self._dom.destroy()
+        except libvirt.libvirtError:
+            pass
+
+        for device in Device.all_of(self):
+            try:
+                device.destroy()
+            except libvirt.libvirtError:
+                pass
+
+        self._was_destroyed = True
+
+    def console(self):
+        """Spawn a virt-manager console of the machine."""
+        sp.call(['virt-manager', '--connect', self._hypervisor_uri, '--show-domain-console', self._uuid])
+
+    def __enter__(self):
+        self.create()
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.destroy()
