@@ -246,6 +246,19 @@ class SATADisk(Disk):
         '''
 
 
+class E1000Interface(Device):
+    def __init__(self, source):
+        self.source = source
+
+    def _to_xml(self):
+        return f'''
+        <interface type="network">
+            <source network="{self.source.name}"/>
+            <model type="e1000"/>
+        </interface>
+        '''
+
+
 class VM:
     """Define a virtual machine from a list of `Component`s.
 
@@ -303,6 +316,8 @@ class VM:
         self._libvirt = None
         self._dom = None
         self._was_destroyed = False
+        self.name = None
+        self._uuid = None
 
     def create(self):
         """Create the machine, and initialize all devices."""
@@ -376,6 +391,78 @@ class VM:
     def console(self):
         """Spawn a virt-manager console of the machine."""
         sp.call(['virt-manager', '--connect', self._hypervisor_uri, '--show-domain-console', self._uuid])
+
+    def __enter__(self):
+        self.create()
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.destroy()
+
+
+class VNet:
+    _CREATE_TRIES = 10
+
+    def __init__(self, internet=False, persistent=False, hypervisor_uri='qemu:///system'):
+        self._internet = internet
+        self._persistent = persistent
+        self._hypervisor_uri = hypervisor_uri
+        self._libvirt = None
+        self._net = None
+        self._was_destroyed = False
+        self._uuid = None
+        self.name = None
+
+    def create(self):
+        if self._hypervisor_uri not in _hypervisor_connections:
+            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
+                self._hypervisor_uri)
+
+        self._libvirt = _hypervisor_connections[self._hypervisor_uri]
+
+        # Attempt to recreate VNet multiple times - in case of uuid/name conflict or OOM
+        for i in range(VNet._CREATE_TRIES):
+            try:
+                self._uuid = str(uuid.uuid4())
+                self.name = f'lln_{hex(random.randint(0, 0xffffffff))[2:]}'
+
+                # TODO: Subnet allocation
+                xml = f'''
+                <network>
+                    <name>{self.name}</name>
+                    <uuid>{self._uuid}</uuid>
+                    <bridge name="{self.name}" stp="off" delay="0"/>
+                    {'<forward mode="nat"/>' if self._internet else ''}
+                    <ip address="10.0.0.1" netmask="255.255.255.0">
+                        <dhcp>
+                            <range start="10.0.0.2" end="10.0.0.254"/>
+                        </dhcp>
+                    </ip>
+                </network>
+                '''
+
+                # Create the network
+                self._net = self._libvirt.networkCreateXML(xml)
+                break
+            except libvirt.libvirtError:
+                # Retry if it's not the last iteration
+                if i == VNet._CREATE_TRIES-1:
+                    raise
+                time.sleep(3)
+
+        if not self._persistent:
+            atexit.register(self.destroy)
+
+    def destroy(self):
+        if self._was_destroyed:
+            return
+
+        try:
+            self._net.destroy()
+        except libvirt.libvirtError:
+            pass
+
+        self._was_destroyed = True
 
     def __enter__(self):
         self.create()
