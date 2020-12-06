@@ -401,6 +401,24 @@ class VM:
 
 
 class VNet:
+    """Define a virtual network, connecting guests, the host, and (optionally) the internet together.
+
+    Args:
+        internet: Should the VM have access to the host's network (i.e. the internet)?
+        persistent: Should the network survive if Python dies?
+        hypervisor_uri: The hypervisor to create the network in (`qemu:///system` by default)
+
+    Example:
+        Two machines in a network:
+
+            net = VNet()
+            net.create()
+            components = [SATADisk('example.qcow2'), E1000Interface(net)]
+            vm1 = VM(components)
+            vm2 = VM(components)
+            vm1.create()
+            vm2.create()
+    """
     _CREATE_TRIES = 10
 
     def __init__(self, internet=False, persistent=False, hypervisor_uri='qemu:///system'):
@@ -414,6 +432,7 @@ class VNet:
         self.name = None
 
     def create(self):
+        """Create the network."""
         if self._hypervisor_uri not in _hypervisor_connections:
             _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
                 self._hypervisor_uri)
@@ -454,6 +473,7 @@ class VNet:
             atexit.register(self.destroy)
 
     def destroy(self):
+        """Destroy the network."""
         if self._was_destroyed:
             return
 
