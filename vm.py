@@ -246,9 +246,16 @@ class SATADisk(Disk):
         '''
 
 
+Disk = SATADisk
+
+
 class E1000Interface(Device):
     def __init__(self, source):
+        assert type(source) is VNet, '`source` must be a VNet'
         self.source = source
+
+    def create(self, machine_name, components):
+        self.source.create(weak=True)
 
     def _to_xml(self):
         return f'''
@@ -257,6 +264,9 @@ class E1000Interface(Device):
             <model type="e1000"/>
         </interface>
         '''
+
+
+Interface = E1000Interface
 
 
 class VM:
@@ -427,17 +437,25 @@ class VNet:
         self._hypervisor_uri = hypervisor_uri
         self._libvirt = None
         self._net = None
-        self._was_destroyed = False
         self._uuid = None
         self.name = None
 
-    def create(self):
+        # -1 = strong reference, a single destroy will destroy the machine
+        # 0+ = weak references, reaching 0 will destroy the machine
+        self._weak_counter = 0
+
+    def create(self, weak=False):
         """Create the network."""
         if self._hypervisor_uri not in _hypervisor_connections:
             _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
                 self._hypervisor_uri)
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
+
+        if self._weak_counter != -1 and weak:
+            self._weak_counter += 1
+        elif not weak:
+            self._weak_counter = -1
 
         # Attempt to recreate VNet multiple times - in case of uuid/name conflict or OOM
         for i in range(VNet._CREATE_TRIES):
@@ -474,19 +492,20 @@ class VNet:
 
     def destroy(self):
         """Destroy the network."""
-        if self._was_destroyed:
-            return
+        if self._weak_counter == -1 or self._weak_counter == 1:
+            try:
+                self._net.destroy()
+            except libvirt.libvirtError:
+                pass
 
-        try:
-            self._net.destroy()
-        except libvirt.libvirtError:
-            pass
-
-        self._was_destroyed = True
+        self._weak_counter -= 1
 
     def __enter__(self):
         self.create()
         return self
 
     def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.destroy()
+
+    def __del__(self):
         self.destroy()
