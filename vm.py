@@ -296,10 +296,6 @@ class VM:
                 System(arch='arm'),
                 SATADisk('example.qcow2'),
             ])
-            # With context manager
-            components = [SATADisk('example.qcow2')]
-            with VM(components) as machine:
-                machine.console()
     """
     _CREATE_TRIES = 10
 
@@ -452,10 +448,15 @@ class VNet:
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
 
+        do_create = self._weak_counter == 0
+
         if self._weak_counter != -1 and weak:
             self._weak_counter += 1
         elif not weak:
             self._weak_counter = -1
+
+        if not do_create:
+            return
 
         # Attempt to recreate VNet multiple times - in case of uuid/name conflict or OOM
         for i in range(VNet._CREATE_TRIES):
@@ -499,13 +500,6 @@ class VNet:
                 pass
 
         self._weak_counter -= 1
-
-    def __enter__(self):
-        self.create()
-        return self
-
-    def __exit__(self, _exc_type, _exc_value, _traceback):
-        self.destroy()
 
     def __del__(self):
         self.destroy()

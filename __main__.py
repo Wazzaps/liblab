@@ -18,7 +18,6 @@ if __name__ == '__main__':
     net = VNet()
 
     for i in range(2):
-        print(f'creating vm #{i+1}')
         vm = VM([ Disk('example.qcow2'), Interface(net) ])
         vm.create()
         vm.console()
