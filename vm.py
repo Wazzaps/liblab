@@ -10,6 +10,7 @@ import string
 import random
 import os.path
 import subprocess as sp
+import xml.etree.ElementTree as ET
 
 _hypervisor_connections = {}
 
@@ -28,6 +29,19 @@ class Component:
             assert SATADisk.of(machine) is my_component
             assert SATADisk.all_of(machine)[0] is my_component
     """
+    def __init__(self, ident):
+        self._ident = ident
+
+    @classmethod
+    def by_id(cls, obj, ident):
+        """Get the first matching component from a VM or list of components by its `ident`.
+
+        TODO: Example
+        """
+        for comp in cls.all_of(obj):
+            if comp._ident == ident:
+                return comp
+
     @classmethod
     def of(cls, obj):
         """Get the first matching component from a VM or list of components.
@@ -76,7 +90,8 @@ class System(Component):
         ram_mib: RAM in MiB allocated to the VM (default: 256MiB)
         cpu_count: The number of cores allocated to the VM (default: 1)
     """
-    def __init__(self, arch='x86_64', chipset='pc-q35-4.2', ram_mib=256, cpu_count=1):
+    def __init__(self, arch='x86_64', chipset='pc-q35-4.2', ram_mib=256, cpu_count=1, ident=None):
+        super().__init__(ident=ident)
         self.arch = arch
         self.chipset = chipset
         self.ram_mib = ram_mib
@@ -105,14 +120,6 @@ class System(Component):
             <cpu mode='host-model' check='partial'/>
             <devices>
                 <emulator>/usr/bin/qemu-system-{arch}</emulator>
-                <serial type='pty'>
-                    <target type='isa-serial' port='0'>
-                        <model name='isa-serial'/>
-                    </target>
-                </serial>
-                <console type='pty'>
-                    <target type='serial' port='0'/>
-                </console>
                 {devices}
                 <video>
                     <model type="vga"/>
@@ -162,7 +169,7 @@ class System(Component):
 
 class Device(Component):
     """A `Component` that needs to be initialized and destroyed, and adds a device to the libvirt XML."""
-    def create(self, machine_name, components):
+    def create(self, hypervisor, machine_name, components):
         pass
 
     def destroy(self):
@@ -187,8 +194,9 @@ class Disk(Device):
             SATADisk('example.qcow2', linked_clone=False)
     """
     _LINKED_CLONES_DIR = '/tmp/liblab_disks'
-    def __init__(self, image_path, linked_clone=True):
+    def __init__(self, image_path, linked_clone=True, ident=None):
         assert image_path.endswith('.qcow2'), 'Images must be QCow2'
+        super().__init__(ident=ident)
         self.image_path = os.path.abspath(image_path)
         self._linked_clone = linked_clone
         self.idx_in_machine = None
@@ -217,7 +225,7 @@ class Disk(Device):
         else:
             return f'{type(self).__name__}({repr(self.image_path)})'
 
-    def create(self, machine_name, components):
+    def create(self, hypervisor, machine_name, components):
         self.idx_in_machine = Disk.all_of(components).index(self)
         if self._linked_clone:
             self.live_image_path = Disk._create_linked_clone(self.image_path, clone_name=f'{machine_name}-disk{self.idx_in_machine}.qcow2')
@@ -250,11 +258,12 @@ Disk = SATADisk
 
 
 class E1000Interface(Device):
-    def __init__(self, source):
+    def __init__(self, source, ident=None):
         assert type(source) is VNet, '`source` must be a VNet'
+        super().__init__(ident=ident)
         self.source = source
 
-    def create(self, machine_name, components):
+    def create(self, hypervisor, machine_name, components):
         self.source.create(weak=True)
 
     def _to_xml(self):
@@ -267,6 +276,36 @@ class E1000Interface(Device):
 
 
 Interface = E1000Interface
+
+
+class SerialPort(Device):
+    """ISA Serial port"""
+    def __init__(self, ident=None):
+        super().__init__(ident=ident)
+        self.idx_in_machine = None
+        self.path = None
+        self._hypervisor = None
+        self._machine_name = None
+
+    @property
+    def pty(self):
+        dom = self._hypervisor.lookupByName(self._machine_name)
+        tree = ET.fromstring(dom.XMLDesc())
+        return tree.find(f"./devices/serial/target[@port='{self.idx_in_machine}']/../source").attrib['path']
+
+    def create(self, hypervisor, machine_name, components):
+        self.idx_in_machine = SerialPort.all_of(components).index(self)
+        self._hypervisor = hypervisor
+        self._machine_name = machine_name
+
+    def _to_xml(self):
+        return f'''
+        <serial type='pty'>
+            <target type='isa-serial' port='{self.idx_in_machine}'>
+                <model name='isa-serial'/>
+            </target>
+        </serial>
+        '''
 
 
 class VM:
@@ -342,7 +381,7 @@ class VM:
                 # Gather devices xml
                 devices_xml = ''
                 for device in Device.all_of(self):
-                    device.create(self.name, self.components)
+                    device.create(self._libvirt, self.name, self.components)
                     devices_xml += device._to_xml()
 
                 xml = '''
