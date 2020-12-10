@@ -1,16 +1,10 @@
-"""
-Virtual machine abstraction
-"""
+"""Virtual machine abstraction"""
 import libvirt
 import sys
 import uuid
 import time
-import atexit
-import string
 import random
-import os.path
 import subprocess as sp
-import xml.etree.ElementTree as ET
 
 _hypervisor_connections = {}
 
@@ -179,135 +173,6 @@ class Device(Component):
         raise NotImplementedError
 
 
-class Disk(Device):
-    """A Storage device backed by a QCow2 image, and linked-cloned by default.
-
-    Use one of the subclasses (such as `SATADisk`).
-
-    Example:
-        Create a linked clone disk:
-
-            SATADisk('example.qcow2')
-
-        Create a live disk (All changes made in VM are saved):
-
-            SATADisk('example.qcow2', linked_clone=False)
-    """
-    _LINKED_CLONES_DIR = '/tmp/liblab_disks'
-    def __init__(self, image_path, linked_clone=True, ident=None):
-        assert image_path.endswith('.qcow2'), 'Images must be QCow2'
-        super().__init__(ident=ident)
-        self.image_path = os.path.abspath(image_path)
-        self._linked_clone = linked_clone
-        self.idx_in_machine = None
-        self.live_image_path = None
-
-    @staticmethod
-    def _create_linked_clone(image_path, clone_name):
-        assert os.path.exists(image_path), f'Disk image not found: {image_path}'
-        clone_path = os.path.join(Disk._LINKED_CLONES_DIR, clone_name)
-        assert not os.path.exists(clone_path), f'Linked clone name conflict: {clone_path} (when creating clone of: {image_path})'
-        if not os.path.exists(Disk._LINKED_CLONES_DIR):
-            os.mkdir(Disk._LINKED_CLONES_DIR)
-
-        sp.check_output([
-            'qemu-img', 'create',
-            '-f', 'qcow2',
-            '-b', image_path,
-            clone_path
-        ])
-
-        return clone_path
-
-    def __str__(self):
-        if self._linked_clone:
-            return f'{type(self).__name__}(base={repr(self.image_path)}, clone={repr(self.live_image_path)})'
-        else:
-            return f'{type(self).__name__}({repr(self.image_path)})'
-
-    def create(self, hypervisor, machine_name, components):
-        self.idx_in_machine = Disk.all_of(components).index(self)
-        if self._linked_clone:
-            self.live_image_path = Disk._create_linked_clone(self.image_path, clone_name=f'{machine_name}-disk{self.idx_in_machine}.qcow2')
-        else:
-            self.live_image_path = self.image_path
-
-    def destroy(self):
-        if self._linked_clone:
-            try:
-                os.unlink(self.live_image_path)
-            except FileNotFoundError:
-                pass
-
-
-class SATADisk(Disk):
-    """`Disk` with a SATA interface.
-    """
-    def _to_xml(self):
-        assert self.live_image_path, 'Please call `Disk.create` first'
-        return f'''
-        <disk type='file' device='disk'>
-            <driver name='qemu' type='qcow2'/>
-            <source file='{self.live_image_path}'/>
-            <target dev='sd{string.ascii_lowercase[self.idx_in_machine]}' bus='sata'/>
-        </disk>
-        '''
-
-
-Disk = SATADisk
-
-
-class E1000Interface(Device):
-    def __init__(self, source, ident=None):
-        assert type(source) is VNet, '`source` must be a VNet'
-        super().__init__(ident=ident)
-        self.source = source
-
-    def create(self, hypervisor, machine_name, components):
-        self.source.create(weak=True)
-
-    def _to_xml(self):
-        return f'''
-        <interface type="network">
-            <source network="{self.source.name}"/>
-            <model type="e1000"/>
-        </interface>
-        '''
-
-
-Interface = E1000Interface
-
-
-class SerialPort(Device):
-    """ISA Serial port"""
-    def __init__(self, ident=None):
-        super().__init__(ident=ident)
-        self.idx_in_machine = None
-        self.path = None
-        self._hypervisor = None
-        self._machine_name = None
-
-    @property
-    def pty(self):
-        dom = self._hypervisor.lookupByName(self._machine_name)
-        tree = ET.fromstring(dom.XMLDesc())
-        return tree.find(f"./devices/serial/target[@port='{self.idx_in_machine}']/../source").attrib['path']
-
-    def create(self, hypervisor, machine_name, components):
-        self.idx_in_machine = SerialPort.all_of(components).index(self)
-        self._hypervisor = hypervisor
-        self._machine_name = machine_name
-
-    def _to_xml(self):
-        return f'''
-        <serial type='pty'>
-            <target type='isa-serial' port='{self.idx_in_machine}'>
-                <model name='isa-serial'/>
-            </target>
-        </serial>
-        '''
-
-
 class VM:
     """Define a virtual machine from a list of `Component`s.
 
@@ -315,7 +180,6 @@ class VM:
 
     Args:
         components: A list of `Component`s that define the VM. A `System` is added automatically if absent
-        persistent: Does the machine (and it's temporary resources) survive if Python dies?
         hypervisor_uri: The hypervisor to create the VM in (`qemu:///system` by default)
 
     Example:
@@ -349,7 +213,7 @@ class VM:
     def __str__(self):
         return VM.pretty_format_components(self.components)
 
-    def __init__(self, components=None, persistent=False, hypervisor_uri='qemu:///system'):
+    def __init__(self, components=None, hypervisor_uri='qemu:///system'):
         if components is None:
             components = []
         if System.of(components) is None:
@@ -357,20 +221,31 @@ class VM:
 
         self.components = components
         self._hypervisor_uri = hypervisor_uri
-        self._persistent = persistent
         self._libvirt = None
         self._dom = None
-        self._was_destroyed = False
         self.name = None
         self._uuid = None
 
-    def create(self):
+        # if this reaches zero then the network gets destroyed
+        self._refcount = 0
+
+        self._create()
+
+    def leak(self):
+        """Makes the current VM object not destroy the domain on garbage collection."""
+        self._refcount += 1
+
+    def _create(self):
         """Create the machine, and initialize all devices."""
         if self._hypervisor_uri not in _hypervisor_connections:
             _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
                 self._hypervisor_uri)
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
+
+        self._refcount += 1
+        if self._refcount != 1:
+            return
 
         # Attempt to recreate VM multiple times - in case of uuid/name conflict or OOM
         for i in range(VM._CREATE_TRIES):
@@ -412,37 +287,27 @@ class VM:
                     raise
                 time.sleep(3)
 
-        if not self._persistent:
-            atexit.register(self.destroy)
-
-    def destroy(self):
+    def _destroy(self):
         """Destroy the machine and all devices."""
-        if self._was_destroyed:
-            return
-
-        try:
-            self._dom.destroy()
-        except libvirt.libvirtError:
-            pass
-
-        for device in Device.all_of(self):
+        self._refcount -= 1
+        if self._refcount <= 1:
             try:
-                device.destroy()
+                self._dom.destroy()
             except libvirt.libvirtError:
                 pass
 
-        self._was_destroyed = True
+            for device in Device.all_of(self):
+                try:
+                    device.destroy()
+                except libvirt.libvirtError:
+                    pass
 
     def console(self):
         """Spawn a virt-manager console of the machine."""
         sp.call(['virt-manager', '--connect', self._hypervisor_uri, '--show-domain-console', self._uuid])
 
-    def __enter__(self):
-        self.create()
-        return self
-
-    def __exit__(self, _exc_type, _exc_value, _traceback):
-        self.destroy()
+    def __del__(self):
+        self._destroy()
 
 
 class VNet:
@@ -450,36 +315,35 @@ class VNet:
 
     Args:
         internet: Should the VM have access to the host's network (i.e. the internet)?
-        persistent: Should the network survive if Python dies?
         hypervisor_uri: The hypervisor to create the network in (`qemu:///system` by default)
 
     Example:
         Two machines in a network:
 
             net = VNet()
-            net.create()
-            components = [SATADisk('example.qcow2'), E1000Interface(net)]
-            vm1 = VM(components)
-            vm2 = VM(components)
-            vm1.create()
-            vm2.create()
+            vm1 = VM([SATADisk('example.qcow2'), E1000Interface(net)])
+            vm2 = VM([SATADisk('example.qcow2'), E1000Interface(net)])
     """
     _CREATE_TRIES = 10
 
-    def __init__(self, internet=False, persistent=False, hypervisor_uri='qemu:///system'):
+    def __init__(self, internet=False, hypervisor_uri='qemu:///system'):
         self._internet = internet
-        self._persistent = persistent
         self._hypervisor_uri = hypervisor_uri
         self._libvirt = None
         self._net = None
         self._uuid = None
         self.name = None
 
-        # -1 = strong reference, a single destroy will destroy the machine
-        # 0+ = weak references, reaching 0 will destroy the machine
-        self._weak_counter = 0
+        # if this reaches zero then the network gets destroyed
+        self._refcount = 0
 
-    def create(self, weak=False):
+        self._create()
+
+    def leak(self):
+        """Makes the current VNet object not destroy the network on garbage collection."""
+        self._refcount += 1
+
+    def _create(self):
         """Create the network."""
         if self._hypervisor_uri not in _hypervisor_connections:
             _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
@@ -487,14 +351,8 @@ class VNet:
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
 
-        do_create = self._weak_counter == 0
-
-        if self._weak_counter != -1 and weak:
-            self._weak_counter += 1
-        elif not weak:
-            self._weak_counter = -1
-
-        if not do_create:
+        self._refcount += 1
+        if self._refcount != 1:
             return
 
         # Attempt to recreate VNet multiple times - in case of uuid/name conflict or OOM
@@ -527,18 +385,15 @@ class VNet:
                     raise
                 time.sleep(3)
 
-        if not self._persistent:
-            atexit.register(self.destroy)
-
-    def destroy(self):
+    def _destroy(self):
         """Destroy the network."""
-        if self._weak_counter == -1 or self._weak_counter == 1:
+        self._refcount -= 1
+        if self._refcount <= 1:
             try:
                 self._net.destroy()
             except libvirt.libvirtError:
                 pass
 
-        self._weak_counter -= 1
 
     def __del__(self):
-        self.destroy()
+        self._destroy()
