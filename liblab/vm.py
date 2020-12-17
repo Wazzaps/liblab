@@ -315,6 +315,8 @@ class VNet:
 
     Args:
         internet: Should the VM have access to the host's network (i.e. the internet)?
+        netboot_root: Make the DHCP server host a PXE+TFTP server and serve an the given directory
+        netboot_file: Which file inside the `netboot_root` should be the main boot file ("pxelinux.0" by default)
         hypervisor_uri: The hypervisor to create the network in (`qemu:///system` by default)
 
     Example:
@@ -326,8 +328,10 @@ class VNet:
     """
     _CREATE_TRIES = 10
 
-    def __init__(self, internet=False, hypervisor_uri='qemu:///system'):
+    def __init__(self, internet=False, netboot_root=None, netboot_file='pxelinux.0', hypervisor_uri='qemu:///system'):
         self._internet = internet
+        self._netboot_root = netboot_root
+        self._netboot_file = netboot_file
         self._hypervisor_uri = hypervisor_uri
         self._libvirt = None
         self._net = None
@@ -369,8 +373,10 @@ class VNet:
                     <bridge name="{self.name}" stp="off" delay="0"/>
                     {'<forward mode="nat"/>' if self._internet else ''}
                     <ip address="10.0.0.1" netmask="255.255.255.0">
+                        {f'<tftp root="{self._netboot_root}"/>' if self._netboot_root else ''}
                         <dhcp>
                             <range start="10.0.0.2" end="10.0.0.254"/>
+                            {f'<bootp file="{self._netboot_file}"/>' if self._netboot_root else ''}
                         </dhcp>
                     </ip>
                 </network>
@@ -388,7 +394,7 @@ class VNet:
     def _destroy(self):
         """Destroy the network."""
         self._refcount -= 1
-        if self._refcount <= 1:
+        if self._refcount <= 1 and self._net:
             try:
                 self._net.destroy()
             except libvirt.libvirtError:
