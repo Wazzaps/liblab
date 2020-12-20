@@ -4,19 +4,20 @@ import subprocess as sp
 import os.path
 import string
 
-class Disk(Device):
-    """A Storage device backed by a QCow2 image, and linked-cloned by default.
+class SATADisk(Device):
+    """
+    A SATA storage device backed by a QCow2 image, and linked-cloned by default.
 
-    Use one of the subclasses (such as `SATADisk`).
+    "Disk" is an alias for "SATADisk".
 
     Example:
         Create a linked clone disk:
 
-            SATADisk('example.qcow2')
+            Disk('example.qcow2')
 
         Create a live disk (All changes made in VM are saved):
 
-            SATADisk('example.qcow2', linked_clone=False)
+            Disk('example.qcow2', linked_clone=False)
     """
     _LINKED_CLONES_DIR = '/tmp/liblab_disks'
     def __init__(self, image_path, linked_clone=True, ident=None):
@@ -64,10 +65,6 @@ class Disk(Device):
             except FileNotFoundError:
                 pass
 
-
-class SATADisk(Disk):
-    """`Disk` with a SATA interface.
-    """
     def _to_xml(self):
         assert self.live_image_path, 'Please call `Disk.create` first'
         return f'''
@@ -77,6 +74,5 @@ class SATADisk(Disk):
             <target dev='sd{string.ascii_lowercase[self.idx_in_machine]}' bus='sata'/>
         </disk>
         '''
-
 
 Disk = SATADisk

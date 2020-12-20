@@ -10,7 +10,8 @@ _hypervisor_connections = {}
 
 
 class Component:
-    """Part of a `VM` that typically defines a `Device` or `System` information.
+    """
+    Part of a `VM` that typically defines a `Device` or `System` information.
 
     Example:
         After creating a VM with a component like so:
@@ -28,9 +29,22 @@ class Component:
 
     @classmethod
     def by_id(cls, obj, ident):
-        """Get the first matching component from a VM or list of components by its `ident`.
+        """
+        Get the first matching component from a VM or list of components by its `ident`.
 
-        TODO: Example
+        Shortened form of this is available in VM class, see example below
+
+        Example:
+            If you have multiple SerialPorts, giving them IDs helps you refer to them:
+
+                machine = VM([SerialPort(ident='main'), SerialPort(ident='alt')])
+                SerialPort.by_id(machine, 'main').pty  # => /dev/pty/1
+                SerialPort.by_id(machine, 'alt').pty  # => /dev/pty/2
+
+                # Shortened (but not type-safe) form
+                machine['main'].pty  # => /dev/pty/1
+                machine['alt'].pty  # => /dev/pty/2
+
         """
         for comp in cls.all_of(obj):
             if comp._ident == ident:
@@ -38,7 +52,8 @@ class Component:
 
     @classmethod
     def of(cls, obj):
-        """Get the first matching component from a VM or list of components.
+        """
+        Get the first matching component from a VM or list of components.
 
         Example:
             The `System` component is a common "singleton" component, which is a good use case for `Component.of`:
@@ -51,7 +66,8 @@ class Component:
 
     @classmethod
     def all_of(cls, obj):
-        """Get a list of all matching components from a VM or list of components.
+        """
+        Get a list of all matching components from a VM or list of components.
 
         Example:
             Get all disks of a machine:
@@ -76,7 +92,8 @@ class Component:
 
 
 class System(Component):
-    """Describes the CPU, Chipset, RAM, and Platform Devices of the VM.
+    """
+    Describes the CPU, Chipset, RAM, and Platform Devices of the VM.
 
     Args:
         arch: The architecture of the VM (default: x86_64)
@@ -174,7 +191,8 @@ class Device(Component):
 
 
 class VM:
-    """Define a virtual machine from a list of `Component`s.
+    """
+    Define a virtual machine from a list of `Component`s.
 
     The machine will be given a random UUID and name (in the format 'llm_xxxxxxxx').
 
@@ -187,24 +205,31 @@ class VM:
 
             # Doesn't have a disk, will be created but won't boot
             machine = VM()
+
             # Enough to boot, has default System() parameters
-            machine = VM([SATADisk('example.qcow2')])
+            machine = VM([Disk('example.qcow2')])
+
             # Machine with extra resources
             machine = VM([
                 System(ram_mib=512, cpu_count=2),
-                SATADisk('example.qcow2'),
+                Disk('example.qcow2'),
             ])
+
             # Machine with alternative architecture (Not implemented)
             machine = VM([
                 System(arch='arm'),
-                SATADisk('example.qcow2'),
+                Disk('example.qcow2'),
             ])
+
+            # Netboot instead of disk
+            machine = VM([Interface(VNet(netboot_root='/tmp/my_netboot'), netboot=True)])
     """
     _CREATE_TRIES = 10
 
     @staticmethod
     def pretty_format_components(components):
-        """Return a pretty representation of the given components.
+        """
+        Return a pretty representation of the given components.
 
         TODO: Currently not pretty
         """
@@ -306,17 +331,21 @@ class VM:
         """Spawn a virt-manager console of the machine."""
         sp.call(['virt-manager', '--connect', self._hypervisor_uri, '--show-domain-console', self._uuid])
 
+    def __getitem__(self, key):
+        return Component.by_id(self, key)
+
     def __del__(self):
         self._destroy()
 
 
 class VNet:
-    """Define a virtual network, connecting guests, the host, and (optionally) the internet together.
+    """
+    Define a virtual network, connecting guests, the host, and (optionally) the internet together.
 
     Args:
         internet: Should the VM have access to the host's network (i.e. the internet)?
         netboot_root: Make the DHCP server host a PXE+TFTP server and serve an the given directory
-        netboot_file: Which file inside the `netboot_root` should be the main boot file ("pxelinux.0" by default)
+        netboot_file: Which file inside the `netboot_root` should be the main boot file (`pxelinux.0` by default)
         hypervisor_uri: The hypervisor to create the network in (`qemu:///system` by default)
 
     Example:
@@ -325,6 +354,10 @@ class VNet:
             net = VNet()
             vm1 = VM([SATADisk('example.qcow2'), E1000Interface(net)])
             vm2 = VM([SATADisk('example.qcow2'), E1000Interface(net)])
+
+        Network with PXE (netboot) server:
+
+            net = VNet(netboot_root='/tmp/my_netboot')
     """
     _CREATE_TRIES = 10
 

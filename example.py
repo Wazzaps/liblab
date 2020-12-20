@@ -27,7 +27,7 @@ def single_machine():
     sp.call(['picocom', SerialPort.of(vm).pty])
 
     # print('Opening other serial port')
-    # sp.call(['picocom', SerialPort.by_id(vm, 'alt').pty])
+    # sp.call(['picocom', vm['alt'].pty])
 
 
 def netboot():
