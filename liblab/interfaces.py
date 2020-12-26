@@ -3,6 +3,42 @@ from liblab.vm import Device, VNet
 import subprocess
 import xml.etree.ElementTree as ET
 
+
+class HIDProxy:
+    """
+    Interface with an HIDProxy (Keyboard and mouse simulation device).
+
+    - Connect an Arduino Leonardo compatible board (I used a cheap beetle usb knockoff)
+    - Flash the "hidproxy.ino" sketch on it
+    - Connect a USB to UART adapter with Adapter.tx -> Arduino.rx and vice-versa
+    - Connect the Arduino to the target PC and the UART adapter to yours
+
+    Commands:
+        identify: Blink the LED and send the version on the serial port
+        mouse_click: Click the given mouse button
+        TODO: the rest
+    """
+    def __init__(self, port):
+        self._port = port
+        # TODO: replace with pyserial for baud rate
+        self._fd = open(port, 'wb', buffering=0)
+        self._fd.write(b'\x00')  # Enter raw mode
+
+    def identify(self):
+        self._fd.write(b'\x01')  # Identify command
+
+    def _tty_mode(self):
+        self._fd.write(b'\x02')  # Switch to TTY mode (default)
+
+    def mouse_click(self, button='left'):
+        if button == 'left':
+            self._fd.write(b'\x09\x01')
+        elif button == 'right':
+            self._fd.write(b'\x09\x02')
+        elif button == 'middle':
+            self._fd.write(b'\x09\x04')
+
+
 class SerialPort(Device):
     """Serial (UART) port."""
     def __init__(self, ident=None):
