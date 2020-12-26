@@ -12,19 +12,22 @@ def multiple_machines():
 
 
 def single_machine():
-    print('Creating net and VM')
+    print('Creating net and opening wireshark')
+    net = VNet()
+    net.wireshark()
+
+    print('Creating VM')
     vm = VM([
         Disk('example.qcow2'),
-        Interface(VNet()),
-        SerialPort(),
-        SerialPort(ident='alt')
+        Interface(net),
+        SerialPort(ident='serial'),
     ])
 
     print('Opening interaction console')
     vm.console()
 
     print('Opening serial port')
-    sp.call(['picocom', SerialPort.of(vm).pty])
+    vm['serial'].console()
 
     # print('Opening other serial port')
     # sp.call(['picocom', vm['alt'].pty])
@@ -49,7 +52,21 @@ def netboot():
     input('Press enter to kill VM')
 
 
+def netboot_physical():
+    print('Creating net')
+
+    # Netboot example setup:
+    #   mkdir /tmp/netboot_example && cd /tmp/netboot_example
+    #   wget http://deb.debian.org/debian/dists/stable/main/installer-amd64/current/images/netboot/gtk/netboot.tar.gz
+    #   tar -xf netboot.tar.gz
+    net = VNet(internet=True, netboot_root='/tmp/netboot_example')
+    net.attach_interface('enx3c18a057096c')
+
+    input('Press enter to kill VNet')
+
+
 if __name__ == '__main__':
     # multiple_machines()
     single_machine()
     # netboot()
+    # netboot_physical()

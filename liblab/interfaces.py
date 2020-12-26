@@ -1,5 +1,6 @@
 """Network and Serial interfaces"""
 from liblab.vm import Device, VNet
+import subprocess
 import xml.etree.ElementTree as ET
 
 class SerialPort(Device):
@@ -33,6 +34,9 @@ class SerialPort(Device):
         self.idx_in_machine = SerialPort.all_of(components).index(self)
         self._hypervisor = hypervisor
         self._machine_name = machine_name
+
+    def console(self):
+        subprocess.call(['picocom', self.pty])
 
     def _to_xml(self):
         return f'''

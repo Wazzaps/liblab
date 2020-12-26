@@ -251,7 +251,7 @@ class VM:
         self.name = None
         self._uuid = None
 
-        # if this reaches zero then the network gets destroyed
+        # if this reaches zero then the VM gets destroyed
         self._refcount = 0
 
         self._create()
@@ -311,6 +311,14 @@ class VM:
                 if i == VM._CREATE_TRIES-1:
                     raise
                 time.sleep(3)
+            except Exception:
+                # We failed to create the VM, destroy all devices
+                for device in Device.all_of(self):
+                    try:
+                        device.destroy()
+                    except libvirt.libvirtError:
+                        pass
+                raise
 
     def _destroy(self):
         """Destroy the machine and all devices."""
@@ -380,6 +388,9 @@ class VNet:
         """Makes the current VNet object not destroy the network on garbage collection."""
         self._refcount += 1
 
+    def attach_interface(self, iface):
+        sp.call(['ip', 'link', 'set', 'dev', iface, 'master', self.name])
+
     def _create(self):
         """Create the network."""
         if self._hypervisor_uri not in _hypervisor_connections:
@@ -399,8 +410,10 @@ class VNet:
                 self.name = f'lln_{hex(random.randint(0, 0xffffffff))[2:]}'
 
                 # TODO: Subnet allocation
+                # no-ping: by default dnsmasq (the dhcp server) sends an arping and an icmp ping to an ip before giving it out.
+                #          since we control the network there's no need for that. This speeds up boot by ~3 secs.
                 xml = f'''
-                <network>
+                <network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
                     <name>{self.name}</name>
                     <uuid>{self._uuid}</uuid>
                     <bridge name="{self.name}" stp="off" delay="0"/>
@@ -412,6 +425,9 @@ class VNet:
                             {f'<bootp file="{self._netboot_file}"/>' if self._netboot_root else ''}
                         </dhcp>
                     </ip>
+                    <dnsmasq:options>
+                        <dnsmasq:option value="no-ping"/>
+                    </dnsmasq:options>
                 </network>
                 '''
 
@@ -423,6 +439,14 @@ class VNet:
                 if i == VNet._CREATE_TRIES-1:
                     raise
                 time.sleep(3)
+
+    def wireshark(self, capture_filter=None, display_filter=None):
+        args = ['wireshark', '-n', '-l', '-k', '-i', self.name]
+        if capture_filter:
+            args += ['-f', capture_filter]
+        if display_filter:
+            args += ['-Y', display_filter]
+        sp.Popen(args, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
     def _destroy(self):
         """Destroy the network."""
