@@ -1,7 +1,9 @@
 """Network and Serial interfaces"""
-from liblab.vm import Device, VNet
+
 import subprocess
 import xml.etree.ElementTree as ET
+
+from liblab.vm import Device, VNet
 
 
 class HIDProxy:
@@ -18,29 +20,31 @@ class HIDProxy:
         mouse_click: Click the given mouse button
         TODO: the rest
     """
+
     def __init__(self, port):
         self._port = port
         # TODO: replace with pyserial for baud rate
-        self._fd = open(port, 'wb', buffering=0)
-        self._fd.write(b'\x00')  # Enter raw mode
+        self._fd = open(port, "wb", buffering=0)
+        self._fd.write(b"\x00")  # Enter raw mode
 
     def identify(self):
-        self._fd.write(b'\x01')  # Identify command
+        self._fd.write(b"\x01")  # Identify command
 
     def _tty_mode(self):
-        self._fd.write(b'\x02')  # Switch to TTY mode (default)
+        self._fd.write(b"\x02")  # Switch to TTY mode (default)
 
-    def mouse_click(self, button='left'):
-        if button == 'left':
-            self._fd.write(b'\x09\x01')
-        elif button == 'right':
-            self._fd.write(b'\x09\x02')
-        elif button == 'middle':
-            self._fd.write(b'\x09\x04')
+    def mouse_click(self, button="left"):
+        if button == "left":
+            self._fd.write(b"\x09\x01")
+        elif button == "right":
+            self._fd.write(b"\x09\x02")
+        elif button == "middle":
+            self._fd.write(b"\x09\x04")
 
 
 class SerialPort(Device):
     """Serial (UART) port."""
+
     def __init__(self, ident=None):
         super().__init__(ident=ident)
         self.idx_in_machine = None
@@ -64,7 +68,9 @@ class SerialPort(Device):
         """
         dom = self._hypervisor.lookupByName(self._machine_name)
         tree = ET.fromstring(dom.XMLDesc())
-        return tree.find(f"./devices/serial/target[@port='{self.idx_in_machine}']/../source").attrib['path']
+        return tree.find(
+            f"./devices/serial/target[@port='{self.idx_in_machine}']/../source"
+        ).attrib["path"]
 
     def create(self, hypervisor, machine_name, components):
         self.idx_in_machine = SerialPort.all_of(components).index(self)
@@ -72,16 +78,16 @@ class SerialPort(Device):
         self._machine_name = machine_name
 
     def console(self):
-        subprocess.call(['picocom', self.pty])
+        subprocess.call(["picocom", self.pty])
 
     def _to_xml(self):
-        return f'''
+        return f"""
         <serial type='pty'>
             <target type='isa-serial' port='{self.idx_in_machine}'>
                 <model name='isa-serial'/>
             </target>
         </serial>
-        '''
+        """
 
 
 class E1000Interface(Device):
@@ -103,20 +109,21 @@ class E1000Interface(Device):
 
             Interface(VNet(netboot_root='/tmp/my_netboot'), netboot=True)
     """
+
     def __init__(self, net, ident=None, netboot=False):
-        assert type(net) is VNet, '`net` must be a VNet'
+        assert type(net) is VNet, "`net` must be a VNet"
         super().__init__(ident=ident)
         self.net = net
         self._netboot = netboot
 
     def _to_xml(self):
-        return f'''
+        return f"""
         <interface type="network">
             <source network="{self.net.name}"/>
             <model type="e1000"/>
             {'<boot order="1"/>' if self._netboot else ''}
         </interface>
-        '''
+        """
 
 
 Interface = E1000Interface

@@ -1,10 +1,11 @@
 """Virtual machine abstraction"""
-import libvirt
-import sys
-import uuid
-import time
+
 import random
 import subprocess as sp
+import time
+import uuid
+
+import libvirt
 
 _hypervisor_connections = {}
 
@@ -24,6 +25,7 @@ class Component:
             assert SATADisk.of(machine) is my_component
             assert SATADisk.all_of(machine)[0] is my_component
     """
+
     def __init__(self, ident):
         self._ident = ident
 
@@ -78,8 +80,7 @@ class Component:
                 for disk in Disk.all_of(machine):
                     print(disk.image_path)  # => '/img/a.qcow2', '/img/b.qcow2'
         """
-        assert isinstance(obj, (VM, list)), \
-            'Component.of(obj): obj must be a `VM` or a `list`'
+        assert isinstance(obj, (VM, list)), "Component.of(obj): obj must be a `VM` or a `list`"
 
         if isinstance(obj, VM):
             obj = obj.components
@@ -101,7 +102,8 @@ class System(Component):
         ram_mib: RAM in MiB allocated to the VM (default: 256MiB)
         cpu_count: The number of cores allocated to the VM (default: 1)
     """
-    def __init__(self, arch='x86_64', chipset='pc-q35-4.2', ram_mib=256, cpu_count=1, ident=None):
+
+    def __init__(self, arch="x86_64", chipset="pc-q35-4.2", ram_mib=256, cpu_count=1, ident=None):
         super().__init__(ident=ident)
         self.arch = arch
         self.chipset = chipset
@@ -115,7 +117,7 @@ class System(Component):
         #         <nvram>/var/lib/libvirt/qemu/nvram/ninox_VARS.fd</nvram>
         #     </os>
 
-        return '''
+        return """
             <memory unit='MiB'>{ram_mib}</memory>
             <currentMemory unit='MiB'>{ram_mib}</currentMemory>
             <vcpu placement='static'>{cpu_count}</vcpu>
@@ -168,18 +170,19 @@ class System(Component):
                 <input type='mouse' bus='ps2'/>
                 <input type='keyboard' bus='ps2'/>
             </devices>
-        '''.format(
+        """.format(
             ram_mib=self.ram_mib,
             cpu_count=self.cpu_count,
             arch=self.arch,
             chipset=self.chipset,
-            firmware_tags='',
-            devices=devices
+            firmware_tags="",
+            devices=devices,
         )
 
 
 class Device(Component):
     """A `Component` that needs to be initialized and destroyed, and adds a device to the libvirt XML."""
+
     def create(self, hypervisor, machine_name, components):
         pass
 
@@ -224,6 +227,7 @@ class VM:
             # Netboot instead of disk
             machine = VM([Interface(VNet(netboot_root='/tmp/my_netboot'), netboot=True)])
     """
+
     _CREATE_TRIES = 10
 
     @staticmethod
@@ -238,7 +242,7 @@ class VM:
     def __str__(self):
         return VM.pretty_format_components(self.components)
 
-    def __init__(self, components=None, hypervisor_uri='qemu:///system'):
+    def __init__(self, components=None, hypervisor_uri="qemu:///system"):
         if components is None:
             components = []
         if System.of(components) is None:
@@ -263,8 +267,7 @@ class VM:
     def _create(self):
         """Create the machine, and initialize all devices."""
         if self._hypervisor_uri not in _hypervisor_connections:
-            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
-                self._hypervisor_uri)
+            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(self._hypervisor_uri)
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
 
@@ -276,24 +279,22 @@ class VM:
         for i in range(VM._CREATE_TRIES):
             try:
                 self._uuid = str(uuid.uuid4())
-                self.name = f'llm_{hex(random.randint(0, 0xffffffff))[2:]}'
+                self.name = f"llm_{hex(random.randint(0, 0xffffffff))[2:]}"
 
                 # Gather devices xml
-                devices_xml = ''
+                devices_xml = ""
                 for device in Device.all_of(self):
                     device.create(self._libvirt, self.name, self.components)
                     devices_xml += device._to_xml()
 
-                xml = '''
+                xml = """
                 <domain type='kvm'>
                     <name>{name}</name>
                     <uuid>{uuid}</uuid>
                     {system}
                 </domain>
-                '''.format(
-                    name=self.name,
-                    uuid=self._uuid,
-                    system=System.of(self)._to_xml(devices_xml)
+                """.format(
+                    name=self.name, uuid=self._uuid, system=System.of(self)._to_xml(devices_xml)
                 )
 
                 # Create the domain
@@ -308,7 +309,7 @@ class VM:
                         pass
 
                 # Retry if it's not the last iteration
-                if i == VM._CREATE_TRIES-1:
+                if i == VM._CREATE_TRIES - 1:
                     raise
                 time.sleep(3)
             except Exception:
@@ -337,7 +338,15 @@ class VM:
 
     def console(self):
         """Spawn a virt-manager console of the machine."""
-        sp.call(['virt-manager', '--connect', self._hypervisor_uri, '--show-domain-console', self._uuid])
+        sp.call(
+            [
+                "virt-manager",
+                "--connect",
+                self._hypervisor_uri,
+                "--show-domain-console",
+                self._uuid,
+            ]
+        )
 
     def __getitem__(self, key):
         return Component.by_id(self, key)
@@ -367,9 +376,16 @@ class VNet:
 
             net = VNet(netboot_root='/tmp/my_netboot')
     """
+
     _CREATE_TRIES = 10
 
-    def __init__(self, internet=False, netboot_root=None, netboot_file='pxelinux.0', hypervisor_uri='qemu:///system'):
+    def __init__(
+        self,
+        internet=False,
+        netboot_root=None,
+        netboot_file="pxelinux.0",
+        hypervisor_uri="qemu:///system",
+    ):
         self._internet = internet
         self._netboot_root = netboot_root
         self._netboot_file = netboot_file
@@ -389,13 +405,12 @@ class VNet:
         self._refcount += 1
 
     def attach_interface(self, iface):
-        sp.call(['ip', 'link', 'set', 'dev', iface, 'master', self.name])
+        sp.call(["ip", "link", "set", "dev", iface, "master", self.name])
 
     def _create(self):
         """Create the network."""
         if self._hypervisor_uri not in _hypervisor_connections:
-            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(
-                self._hypervisor_uri)
+            _hypervisor_connections[self._hypervisor_uri] = libvirt.open(self._hypervisor_uri)
 
         self._libvirt = _hypervisor_connections[self._hypervisor_uri]
 
@@ -407,12 +422,12 @@ class VNet:
         for i in range(VNet._CREATE_TRIES):
             try:
                 self._uuid = str(uuid.uuid4())
-                self.name = f'lln_{hex(random.randint(0, 0xffffffff))[2:]}'
+                self.name = f"lln_{hex(random.randint(0, 0xffffffff))[2:]}"
 
                 # TODO: Subnet allocation
                 # no-ping: by default dnsmasq (the dhcp server) sends an arping and an icmp ping to an ip before giving it out.
                 #          since we control the network there's no need for that. This speeds up boot by ~3 secs.
-                xml = f'''
+                xml = f"""
                 <network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
                     <name>{self.name}</name>
                     <uuid>{self._uuid}</uuid>
@@ -429,23 +444,23 @@ class VNet:
                         <dnsmasq:option value="no-ping"/>
                     </dnsmasq:options>
                 </network>
-                '''
+                """
 
                 # Create the network
                 self._net = self._libvirt.networkCreateXML(xml)
                 break
             except libvirt.libvirtError:
                 # Retry if it's not the last iteration
-                if i == VNet._CREATE_TRIES-1:
+                if i == VNet._CREATE_TRIES - 1:
                     raise
                 time.sleep(3)
 
     def wireshark(self, capture_filter=None, display_filter=None):
-        args = ['wireshark', '-n', '-l', '-k', '-i', self.name]
+        args = ["wireshark", "-n", "-l", "-k", "-i", self.name]
         if capture_filter:
-            args += ['-f', capture_filter]
+            args += ["-f", capture_filter]
         if display_filter:
-            args += ['-Y', display_filter]
+            args += ["-Y", display_filter]
         sp.Popen(args, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
     def _destroy(self):
@@ -456,7 +471,6 @@ class VNet:
                 self._net.destroy()
             except libvirt.libvirtError:
                 pass
-
 
     def __del__(self):
         self._destroy()
