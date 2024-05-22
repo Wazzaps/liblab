@@ -4,8 +4,11 @@ import random
 import subprocess as sp
 import time
 import uuid
+from typing_extensions import Self
 
 import libvirt
+
+import liblab.keycodes
 
 _hypervisor_connections = {}
 
@@ -26,11 +29,11 @@ class Component:
             assert SATADisk.all_of(machine)[0] is my_component
     """
 
-    def __init__(self, ident):
+    def __init__(self, ident: str | None = None):
         self._ident = ident
 
     @classmethod
-    def by_id(cls, obj, ident):
+    def by_id(cls, obj, ident) -> Self | None:
         """
         Get the first matching component from a VM or list of components by its `ident`.
 
@@ -53,7 +56,7 @@ class Component:
                 return comp
 
     @classmethod
-    def of(cls, obj):
+    def of(cls, obj) -> Self | None:
         """
         Get the first matching component from a VM or list of components.
 
@@ -67,7 +70,7 @@ class Component:
             return comp
 
     @classmethod
-    def all_of(cls, obj):
+    def all_of(cls, obj: "VM | list[Self]") -> list[Self]:
         """
         Get a list of all matching components from a VM or list of components.
 
@@ -103,7 +106,7 @@ class System(Component):
         cpu_count: The number of cores allocated to the VM (default: 1)
     """
 
-    def __init__(self, arch="x86_64", chipset="pc-q35-4.2", ram_mib=256, cpu_count=1, ident=None):
+    def __init__(self, arch="x86_64", chipset="pc-q35-6.2", ram_mib=256, cpu_count=1, ident=None):
         super().__init__(ident=ident)
         self.arch = arch
         self.chipset = chipset
@@ -116,6 +119,9 @@ class System(Component):
         #         <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
         #         <nvram>/var/lib/libvirt/qemu/nvram/ninox_VARS.fd</nvram>
         #     </os>
+        # TODO: QXL/Spice graphics
+        # TODO: memballoon
+        # TODO: virtio-rng
 
         return """
             <memory unit='MiB'>{ram_mib}</memory>
@@ -130,7 +136,12 @@ class System(Component):
                 <apic/>
                 <vmport state='off'/>
             </features>
-            <cpu mode='host-model' check='partial'/>
+            <cpu mode="host-passthrough" check="none" migratable="on"/>
+            <clock offset="utc">
+                <timer name="rtc" tickpolicy="catchup"/>
+                <timer name="pit" tickpolicy="delay"/>
+                <timer name="hpet" present="no"/>
+            </clock>
             <devices>
                 <emulator>/usr/bin/qemu-system-{arch}</emulator>
                 {devices}
@@ -183,8 +194,16 @@ class System(Component):
 class Device(Component):
     """A `Component` that needs to be initialized and destroyed, and adds a device to the libvirt XML."""
 
-    def create(self, hypervisor, machine_name, components):
-        pass
+    def __init__(self, ident: str | None = None):
+        super().__init__(ident=ident)
+        self._hypervisor = None
+        self._machine_name = None
+
+    def create(
+        self, hypervisor: libvirt.virConnect | None, machine_name: str, components: list[Component]
+    ):
+        self._hypervisor = hypervisor
+        self._machine_name = machine_name
 
     def destroy(self):
         pass
@@ -242,9 +261,7 @@ class VM:
     def __str__(self):
         return VM.pretty_format_components(self.components)
 
-    def __init__(self, components=None, hypervisor_uri="qemu:///system"):
-        if components is None:
-            components = []
+    def __init__(self, components: list[Component], hypervisor_uri="qemu:///system"):
         if System.of(components) is None:
             components.append(System())
 
@@ -321,14 +338,17 @@ class VM:
                         pass
                 raise
 
-    def _destroy(self):
+    def destroy(self):
         """Destroy the machine and all devices."""
+        if self._refcount == 0:
+            return
         self._refcount -= 1
         if self._refcount <= 1:
-            try:
-                self._dom.destroy()
-            except libvirt.libvirtError:
-                pass
+            if self._dom:
+                try:
+                    self._dom.destroy()
+                except libvirt.libvirtError:
+                    pass
 
             for device in Device.all_of(self):
                 try:
@@ -348,11 +368,17 @@ class VM:
             ]
         )
 
+    def type(self, text: str) -> None:
+        """Type text into the console."""
+        for c in text:
+            self._dom.sendKey(0, 0, [liblab.keycodes.keys[c.upper()]], 1, 0)
+            time.sleep(0.05)
+
     def __getitem__(self, key):
         return Component.by_id(self, key)
 
     def __del__(self):
-        self._destroy()
+        self.destroy()
 
 
 class VNet:
@@ -455,6 +481,23 @@ class VNet:
                     raise
                 time.sleep(3)
 
+    @property
+    def dhcp_leases(self):
+        """
+        Get a dictionary of DHCP leases on the network.
+
+        Example:
+            net = VNet()
+            print(net.dhcp_leases)
+        """
+        if not self._net:
+            return {}
+
+        leases = {}
+        for lease in self._net.DHCPLeases():
+            leases[lease["mac"]] = lease["ipaddr"]
+        return leases
+
     def wireshark(self, capture_filter=None, display_filter=None):
         args = ["wireshark", "-n", "-l", "-k", "-i", self.name]
         if capture_filter:
@@ -463,8 +506,10 @@ class VNet:
             args += ["-Y", display_filter]
         sp.Popen(args, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
 
-    def _destroy(self):
+    def destroy(self):
         """Destroy the network."""
+        if self._refcount == 0:
+            return
         self._refcount -= 1
         if self._refcount <= 1 and self._net:
             try:
@@ -473,4 +518,4 @@ class VNet:
                 pass
 
     def __del__(self):
-        self._destroy()
+        self.destroy()

@@ -9,6 +9,7 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3.11"
 libvirt-python = "^10.3.0"
+typing-extensions = "^4.11.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.4.2"
