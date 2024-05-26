@@ -133,8 +133,20 @@ class _BaseInterface(Device):
         ).attrib["address"]
 
     @property
+    def ip_addrs(self) -> list[str]:
+        addrs = []
+        for lease in self.net.dhcp_leases:
+            if lease.mac_addr == self.mac_addr:
+                addrs.append(lease.ip_addr)
+        return addrs
+
+    @property
     def ip_addr(self) -> str | None:
-        return self.net.dhcp_leases.get(self.mac_addr, None)
+        addrs = self.ip_addrs
+        if addrs:
+            return addrs[0]
+        else:
+            return None
 
 
 class VirtioInterface(_BaseInterface):

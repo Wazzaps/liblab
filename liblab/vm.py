@@ -1,12 +1,16 @@
 """Virtual machine abstraction"""
 
+import dataclasses
+import json
 import random
+import struct
 import subprocess as sp
 import time
 import uuid
-from typing_extensions import Self
+from os import PathLike
 
 import libvirt
+from typing_extensions import Self
 
 import liblab.keycodes
 
@@ -106,22 +110,34 @@ class System(Component):
         cpu_count: The number of cores allocated to the VM (default: 1)
     """
 
-    def __init__(self, arch="x86_64", chipset="pc-q35-6.2", ram_mib=256, cpu_count=1, ident=None):
+    def __init__(
+        self,
+        arch="x86_64",
+        chipset="pc-q35-6.2",
+        ram_mib=256,
+        cpu_count=1,
+        efi_image: PathLike | None = None,
+        ident=None,
+    ):
         super().__init__(ident=ident)
         self.arch = arch
         self.chipset = chipset
         self.ram_mib = ram_mib
         self.cpu_count = cpu_count
+        self.efi_image = efi_image
 
-    def _to_xml(self, devices):
-        # TODO: UEFI
-        #     <os>
-        #         <loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
-        #         <nvram>/var/lib/libvirt/qemu/nvram/ninox_VARS.fd</nvram>
-        #     </os>
+    def _to_xml(self, vm: "VM", devices_xml: str):
         # TODO: QXL/Spice graphics
         # TODO: memballoon
         # TODO: virtio-rng
+        from liblab import NVRAMImage
+
+        efi_snippet = ""
+        if self.efi_image:
+            efi_snippet += f'<loader readonly="yes" type="pflash">{self.efi_image}</loader>'
+
+        if efi_nvram := NVRAMImage.of(vm):
+            efi_snippet += f"<nvram>{efi_nvram.live_image_path}</nvram>"
 
         return """
             <memory unit='MiB'>{ram_mib}</memory>
@@ -144,7 +160,7 @@ class System(Component):
             </clock>
             <devices>
                 <emulator>/usr/bin/qemu-system-{arch}</emulator>
-                {devices}
+                {devices_xml}
                 <video>
                     <model type="vga"/>
                 </video>
@@ -186,8 +202,8 @@ class System(Component):
             cpu_count=self.cpu_count,
             arch=self.arch,
             chipset=self.chipset,
-            firmware_tags="",
-            devices=devices,
+            firmware_tags=efi_snippet,
+            devices_xml=devices_xml,
         )
 
 
@@ -311,7 +327,9 @@ class VM:
                     {system}
                 </domain>
                 """.format(
-                    name=self.name, uuid=self._uuid, system=System.of(self)._to_xml(devices_xml)
+                    name=self.name,
+                    uuid=self._uuid,
+                    system=System.of(self)._to_xml(self, devices_xml),
                 )
 
                 # Create the domain
@@ -381,6 +399,19 @@ class VM:
         self.destroy()
 
 
+@dataclasses.dataclass
+class DHCPLease:
+    iface: str
+    expiry_time: int
+    type: int
+    mac_addr: str
+    ip_addr: str
+    prefix: int
+    hostname: str | None
+    client_id: str | None
+    iaid: str | None
+
+
 class VNet:
     """
     Define a virtual network, connecting guests, the host, and (optionally) the internet together.
@@ -444,25 +475,34 @@ class VNet:
         if self._refcount != 1:
             return
 
+        # Get existing system routes, so we don't conflict with them
+        routes = [route["dst"] for route in json.loads(sp.check_output(["ip", "--json", "route"]))]
+
         # Attempt to recreate VNet multiple times - in case of uuid/name conflict or OOM
         for i in range(VNet._CREATE_TRIES):
             try:
                 self._uuid = str(uuid.uuid4())
                 self.name = f"lln_{hex(random.randint(0, 0xffffffff))[2:]}"
 
-                # TODO: Subnet allocation
-                # no-ping: by default dnsmasq (the dhcp server) sends an arping and an icmp ping to an ip before giving it out.
-                #          since we control the network there's no need for that. This speeds up boot by ~3 secs.
+                oct1 = random.randint(0, 254)
+                oct2 = random.randint(0, 254)
+
+                if any(_subnets_intersect(route, f"10.{oct1}.{oct2}.0/24") for route in routes):
+                    raise ValueError("Subnet conflict")
+
+                # no-ping: by default dnsmasq (the dhcp server) sends an arping and an icmp ping to
+                #          an ip before giving it out. since we control the network there's no need
+                #          for that. This speeds up boot by ~3 secs.
                 xml = f"""
                 <network xmlns:dnsmasq='http://libvirt.org/schemas/network/dnsmasq/1.0'>
                     <name>{self.name}</name>
                     <uuid>{self._uuid}</uuid>
                     <bridge name="{self.name}" stp="off" delay="0"/>
                     {'<forward mode="nat"/>' if self._internet else ''}
-                    <ip address="10.0.0.1" netmask="255.255.255.0">
+                    <ip address="10.{oct1}.{oct2}.1" netmask="255.255.255.0">
                         {f'<tftp root="{self._netboot_root}"/>' if self._netboot_root else ''}
                         <dhcp>
-                            <range start="10.0.0.2" end="10.0.0.254"/>
+                            <range start="10.{oct1}.{oct2}.2" end="10.{oct1}.{oct2}.254"/>
                             {f'<bootp file="{self._netboot_file}"/>' if self._netboot_root else ''}
                         </dhcp>
                     </ip>
@@ -475,14 +515,15 @@ class VNet:
                 # Create the network
                 self._net = self._libvirt.networkCreateXML(xml)
                 break
-            except libvirt.libvirtError:
+            except libvirt.libvirtError as e:
                 # Retry if it's not the last iteration
                 if i == VNet._CREATE_TRIES - 1:
                     raise
-                time.sleep(3)
+                if isinstance(e, libvirt.libvirtError):
+                    time.sleep(3)
 
     @property
-    def dhcp_leases(self):
+    def dhcp_leases(self) -> list[DHCPLease]:
         """
         Get a dictionary of DHCP leases on the network.
 
@@ -491,11 +532,23 @@ class VNet:
             print(net.dhcp_leases)
         """
         if not self._net:
-            return {}
+            return []
 
-        leases = {}
+        leases = []
         for lease in self._net.DHCPLeases():
-            leases[lease["mac"]] = lease["ipaddr"]
+            leases.append(
+                DHCPLease(
+                    iface=lease["iface"],
+                    expiry_time=lease["expirytime"],
+                    type=lease["type"],
+                    mac_addr=lease["mac"],
+                    ip_addr=lease["ipaddr"],
+                    prefix=lease["prefix"],
+                    hostname=lease["hostname"],
+                    client_id=lease["clientid"],
+                    iaid=lease["iaid"],
+                )
+            )
         return leases
 
     def wireshark(self, capture_filter=None, display_filter=None):
@@ -519,3 +572,16 @@ class VNet:
 
     def __del__(self):
         self.destroy()
+
+
+def _subnets_intersect(a: str, b: str) -> bool:
+    subnet_ranges = []
+    for subnet in (a, b):
+        ip, mask = subnet.split("/")
+        rev_mask = 0xFFFFFFFF >> int(mask)
+        ip = struct.unpack(">I", bytes(int(octet) for octet in ip.split(".")))[0]
+        subnet_ranges.append((ip & ~rev_mask, ip | rev_mask))
+
+    return (
+        subnet_ranges[0][0] <= subnet_ranges[1][1] and subnet_ranges[0][1] >= subnet_ranges[1][0]
+    )
