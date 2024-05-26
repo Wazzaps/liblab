@@ -577,6 +577,8 @@ class VNet:
 def _subnets_intersect(a: str, b: str) -> bool:
     subnet_ranges = []
     for subnet in (a, b):
+        if subnet.count("/") != 1:
+            return False
         ip, mask = subnet.split("/")
         rev_mask = 0xFFFFFFFF >> int(mask)
         ip = struct.unpack(">I", bytes(int(octet) for octet in ip.split(".")))[0]
